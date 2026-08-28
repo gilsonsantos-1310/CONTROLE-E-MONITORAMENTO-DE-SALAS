@@ -1,0 +1,1191 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Horário Vivo — Agendamento de Salas e Laboratórios</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+<style>
+  :root{
+    --ink:#1B2A4E;
+    --ink-2:#2A3D6B;
+    --bg:#F4F6FB;
+    --surface:#FFFFFF;
+    --border:#DCE1EC;
+    --muted:#5B6472;
+    --muted-2:#8891A0;
+    --free:#1F9E77;
+    --free-bg:#E6F5EF;
+    --pending:#C6821F;
+    --pending-bg:#FCF1DC;
+    --reserved:#2E3A8C;
+    --reserved-bg:#E7E9F7;
+    --danger:#C1443C;
+    --danger-bg:#FBE7E5;
+  }
+  *{ font-family:'Inter', sans-serif; }
+  .font-display{ font-family:'Space Grotesk', sans-serif; }
+  .font-mono{ font-family:'JetBrains Mono', monospace; }
+  body{ background:var(--bg); }
+  ::-webkit-scrollbar{ height:10px; width:10px; }
+  ::-webkit-scrollbar-track{ background:transparent; }
+  ::-webkit-scrollbar-thumb{ background:#C7CEDC; border-radius:8px; }
+  ::-webkit-scrollbar-thumb:hover{ background:#AEB7CB; }
+  .focus-ring:focus-visible{ outline:2px solid var(--ink-2); outline-offset:2px; }
+  .grid-cell{ transition: transform .12s ease, box-shadow .12s ease; }
+  .grid-cell:hover{ transform: translateY(-1px); }
+  .modal-in{ animation: modalIn .18s ease-out; }
+  @keyframes modalIn{ from{ opacity:0; transform:translateY(6px) scale(.98);} to{opacity:1; transform:translateY(0) scale(1);} }
+  .toast-in{ animation: toastIn .22s ease-out; }
+  @keyframes toastIn{ from{opacity:0; transform:translateX(20px);} to{opacity:1; transform:translateX(0);} }
+  .sticky-col{ position: sticky; left:0; z-index:5; background:var(--surface); }
+  .shift-row td{ background:var(--ink); color:#fff; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel">
+const { useState, useMemo, useEffect, useRef, Fragment } = React;
+
+/* =========================================================================
+   MOCK DATA MODELS — User / Room-Lab / Booking
+   Em produção, isso viria de uma API real. Aqui tudo vive em memória
+   (estado React) para permitir teste imediato, sem backend.
+   ========================================================================= */
+
+function uid(prefix){ return prefix + '_' + Math.random().toString(36).slice(2,9); }
+
+function formatDate(d){
+  const y = d.getFullYear();
+  const m = String(d.getMonth()+1).padStart(2,'0');
+  const day = String(d.getDate()).padStart(2,'0');
+  return `${y}-${m}-${day}`;
+}
+function addDays(d, n){ const r = new Date(d); r.setDate(r.getDate()+n); return r; }
+function formatDateBR(iso){
+  const [y,m,d] = iso.split('-');
+  return `${d}/${m}/${y}`;
+}
+function toMinutes(hhmm){ const [h,m] = hhmm.split(':').map(Number); return h*60+m; }
+function overlaps(aStart,aEnd,bStart,bEnd){
+  return toMinutes(aStart) < toMinutes(bEnd) && toMinutes(bStart) < toMinutes(aEnd);
+}
+
+const TODAY = formatDate(new Date());
+const TOMORROW = formatDate(addDays(new Date(),1));
+
+const PERIODS = [
+  {id:1, shift:'Manhã', start:'07:00', end:'07:50'},
+  {id:2, shift:'Manhã', start:'07:50', end:'08:40'},
+  {id:3, shift:'Manhã', start:'08:40', end:'09:30'},
+  {id:4, shift:'Manhã', start:'09:50', end:'10:40'},
+  {id:5, shift:'Manhã', start:'10:40', end:'11:30'},
+  {id:6, shift:'Manhã', start:'11:30', end:'12:20'},
+  {id:7, shift:'Tarde', start:'13:30', end:'14:20'},
+  {id:8, shift:'Tarde', start:'14:20', end:'15:10'},
+  {id:9, shift:'Tarde', start:'15:10', end:'16:00'},
+  {id:10, shift:'Tarde', start:'16:20', end:'17:10'},
+  {id:11, shift:'Tarde', start:'17:10', end:'18:00'},
+  {id:12, shift:'Noite', start:'19:00', end:'19:50'},
+  {id:13, shift:'Noite', start:'19:50', end:'20:40'},
+  {id:14, shift:'Noite', start:'20:50', end:'21:40'},
+];
+
+const INITIAL_USERS = [
+  {id:'u1', username:'professor', password:'prof123', name:'Ana Souza', role:'professor'},
+  {id:'u2', username:'admin', password:'admin123', name:'Carlos Lima', role:'admin'},
+  {id:'u3', username:'joao', password:'prof123', name:'João Pereira', role:'professor'},
+];
+
+const INITIAL_ROOMS = [
+  {id:'r1', code:'SALA-101', name:'Sala 101', type:'sala', capacity:35, resources:['Projetor','Quadro branco']},
+  {id:'r2', code:'SALA-102', name:'Sala 102', type:'sala', capacity:35, resources:['Projetor']},
+  {id:'r3', code:'SALA-203', name:'Sala 203', type:'sala', capacity:40, resources:['Ar-condicionado','TV']},
+  {id:'r4', code:'LAB-INF1', name:'Lab. de Informática 1', type:'laboratorio', capacity:30, resources:['30 computadores','Projetor']},
+  {id:'r5', code:'LAB-INF2', name:'Lab. de Informática 2', type:'laboratorio', capacity:30, resources:['30 computadores']},
+  {id:'r6', code:'LAB-QUI', name:'Lab. de Química', type:'laboratorio', capacity:25, resources:['Bancadas','Capela de exaustão']},
+  {id:'r7', code:'LAB-FIS', name:'Lab. de Física', type:'laboratorio', capacity:25, resources:['Kits experimentais']},
+  {id:'r8', code:'AUD-01', name:'Auditório', type:'sala', capacity:120, resources:['Som','Projetor','Palco']},
+];
+
+const INITIAL_BOOKINGS = [
+  {id:'b1', roomId:'r4', professorId:'u1', date:TODAY, start:'07:50', end:'09:30', subject:'Introdução à Programação', className:'2ºA', justification:'Aula prática de lógica de programação.', status:'aprovado', rejectionReason:''},
+  {id:'b2', roomId:'r1', professorId:'u3', date:TODAY, start:'13:30', end:'14:20', subject:'História', className:'1ºB', justification:'Necessário projetor para apresentação de slides.', status:'pendente', rejectionReason:''},
+  {id:'b3', roomId:'r6', professorId:'u1', date:TOMORROW, start:'09:50', end:'11:30', subject:'Química', className:'3ºC', justification:'Experimento de titulação ácido-base.', status:'aprovado', rejectionReason:''},
+  {id:'b4', roomId:'r8', professorId:'u3', date:TODAY, start:'19:00', end:'20:40', subject:'Reunião de pais', className:'Geral', justification:'Apresentação do projeto anual.', status:'recusado', rejectionReason:'Auditório já reservado para evento institucional nesse horário.'},
+];
+
+/* =========================================================================
+   LÓGICA DE DISPONIBILIDADE E CONFLITOS
+   ========================================================================= */
+
+function getSlotInfo(roomId, date, period, bookings){
+  const overlapping = bookings.filter(b =>
+    b.roomId === roomId && b.date === date && b.status !== 'recusado' &&
+    overlaps(b.start, b.end, period.start, period.end)
+  );
+  const approved = overlapping.find(b => b.status === 'aprovado');
+  if (approved) return { status:'reservado', bookings:[approved] };
+  const pending = overlapping.filter(b => b.status === 'pendente');
+  if (pending.length) return { status:'pendente', bookings: pending };
+  return { status:'livre', bookings:[] };
+}
+
+function hasApprovedConflict(candidate, bookings, excludeId){
+  return bookings.find(b =>
+    b.id !== excludeId &&
+    b.status === 'aprovado' &&
+    b.roomId === candidate.roomId &&
+    b.date === candidate.date &&
+    overlaps(b.start, b.end, candidate.start, candidate.end)
+  ) || null;
+}
+
+/* =========================================================================
+   COMPONENTES DE APOIO (UI)
+   ========================================================================= */
+
+function Badge({ status }){
+  const map = {
+    livre:      { bg:'var(--free-bg)',     fg:'var(--free)',     label:'Livre' },
+    pendente:   { bg:'var(--pending-bg)',  fg:'var(--pending)',  label:'Pendente' },
+    reservado:  { bg:'var(--reserved-bg)', fg:'var(--reserved)', label:'Reservado' },
+    aprovado:   { bg:'var(--reserved-bg)', fg:'var(--reserved)', label:'Aprovado' },
+    recusado:   { bg:'var(--danger-bg)',   fg:'var(--danger)',   label:'Recusado' },
+  };
+  const s = map[status] || map.livre;
+  return (
+    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold"
+          style={{ background:s.bg, color:s.fg }}>
+      <span className="w-1.5 h-1.5 rounded-full" style={{ background:s.fg }}></span>
+      {s.label}
+    </span>
+  );
+}
+
+function Toast({ toast }){
+  if (!toast) return null;
+  const map = {
+    success: { bg:'var(--ink)', icon:'✓' },
+    error:   { bg:'var(--danger)', icon:'!' },
+    info:    { bg:'var(--ink-2)', icon:'i' },
+  };
+  const s = map[toast.type] || map.info;
+  return (
+    <div className="fixed top-5 right-5 z-[100] toast-in max-w-sm">
+      <div className="rounded-xl shadow-lg px-4 py-3 flex items-start gap-3 text-white" style={{ background:s.bg }}>
+        <span className="w-5 h-5 shrink-0 rounded-full bg-white/20 flex items-center justify-center text-xs font-bold">{s.icon}</span>
+        <p className="text-sm leading-snug">{toast.message}</p>
+      </div>
+    </div>
+  );
+}
+
+function Modal({ title, onClose, children, wide }){
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[#0B1220]/50" onMouseDown={(e)=>{ if(e.target===e.currentTarget) onClose(); }}>
+      <div className={"modal-in bg-white rounded-2xl shadow-2xl w-full " + (wide ? "max-w-2xl" : "max-w-md") + " max-h-[90vh] overflow-y-auto"}>
+        <div className="flex items-center justify-between px-6 py-4 border-b" style={{ borderColor:'var(--border)' }}>
+          <h3 className="font-display font-semibold text-lg" style={{ color:'var(--ink)' }}>{title}</h3>
+          <button onClick={onClose} className="w-8 h-8 rounded-full flex items-center justify-center text-[var(--muted)] hover:bg-gray-100 focus-ring" aria-label="Fechar">✕</button>
+        </div>
+        <div className="p-6">{children}</div>
+      </div>
+    </div>
+  );
+}
+
+function Field({ label, children, hint }){
+  return (
+    <label className="block mb-4">
+      <span className="block text-sm font-medium mb-1.5" style={{ color:'var(--ink)' }}>{label}</span>
+      {children}
+      {hint && <span className="block text-xs mt-1" style={{ color:'var(--muted-2)' }}>{hint}</span>}
+    </label>
+  );
+}
+
+const inputClass = "w-full rounded-lg border px-3 py-2 text-sm focus-ring outline-none bg-white";
+const inputStyle = { borderColor:'var(--border)', color:'var(--ink)' };
+
+function PrimaryButton({ children, ...props }){
+  return (
+    <button {...props} className={"rounded-lg px-4 py-2 text-sm font-semibold text-white transition hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed focus-ring " + (props.className||"")} style={{ background:'var(--ink)' }}>
+      {children}
+    </button>
+  );
+}
+function SecondaryButton({ children, ...props }){
+  return (
+    <button {...props} className={"rounded-lg px-4 py-2 text-sm font-semibold transition hover:bg-gray-50 focus-ring border " + (props.className||"")} style={{ borderColor:'var(--border)', color:'var(--ink)' }}>
+      {children}
+    </button>
+  );
+}
+function DangerButton({ children, ...props }){
+  return (
+    <button {...props} className={"rounded-lg px-3 py-1.5 text-xs font-semibold text-white transition hover:opacity-90 focus-ring " + (props.className||"")} style={{ background:'var(--danger)' }}>
+      {children}
+    </button>
+  );
+}
+
+function StatCard({ label, value, accent }){
+  return (
+    <div className="bg-white rounded-2xl border p-4 flex flex-col gap-1" style={{ borderColor:'var(--border)' }}>
+      <span className="text-xs font-medium uppercase tracking-wide" style={{ color:'var(--muted-2)' }}>{label}</span>
+      <span className="font-display text-2xl font-bold" style={{ color: accent || 'var(--ink)' }}>{value}</span>
+    </div>
+  );
+}
+
+function RoomTypeTag({ type }){
+  const isLab = type === 'laboratorio';
+  return (
+    <span className="inline-flex items-center gap-1 text-[10px] font-semibold px-1.5 py-0.5 rounded"
+          style={{ background: isLab ? 'var(--reserved-bg)' : '#EEF1F8', color: isLab ? 'var(--reserved)' : 'var(--muted)' }}>
+      {isLab ? '🧪 LAB' : '🏫 SALA'}
+    </span>
+  );
+}
+
+/* =========================================================================
+   LOGIN
+   ========================================================================= */
+
+function LoginScreen({ users, onLogin, showToast }){
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [error, setError] = useState('');
+
+  function handleSubmit(e){
+    e.preventDefault();
+    const user = users.find(u => u.username === username.trim() && u.password === password);
+    if (!user){ setError('Usuário ou senha inválidos.'); return; }
+    setError('');
+    onLogin(user);
+    showToast('success', `Bem-vindo(a), ${user.name.split(' ')[0]}!`);
+  }
+
+  function quickFill(u, p){ setUsername(u); setPassword(p); setError(''); }
+
+  return (
+    <div className="min-h-screen grid grid-cols-1 lg:grid-cols-2">
+      <div className="hidden lg:flex flex-col justify-between p-12 text-white" style={{ background: 'linear-gradient(160deg, var(--ink), var(--ink-2))' }}>
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 rounded-xl bg-white/15 grid grid-cols-2 gap-0.5 p-1.5">
+            <span className="bg-white/90 rounded-sm"></span><span className="bg-white/40 rounded-sm"></span>
+            <span className="bg-white/40 rounded-sm"></span><span className="bg-white/90 rounded-sm"></span>
+          </div>
+          <span className="font-display font-bold text-xl">Horário Vivo</span>
+        </div>
+        <div>
+          <h1 className="font-display text-4xl font-bold leading-tight mb-4">
+            O quadro de horários<br/>da sua escola, sempre<br/>atualizado.
+          </h1>
+          <p className="text-white/70 max-w-md leading-relaxed">
+            Veja em tempo real quais salas e laboratórios estão livres, solicite
+            agendamentos em segundos e acompanhe a aprovação da coordenação —
+            sem planilhas, sem conflitos de horário.
+          </p>
+        </div>
+        <div className="flex gap-8 font-mono text-xs text-white/60">
+          <span>08 ESPAÇOS</span>
+          <span>14 PERÍODOS/DIA</span>
+          <span>0 CONFLITOS</span>
+        </div>
+      </div>
+
+      <div className="flex items-center justify-center p-6 sm:p-10">
+        <div className="w-full max-w-sm">
+          <div className="lg:hidden flex items-center gap-2 mb-8 justify-center">
+            <div className="w-8 h-8 rounded-lg grid grid-cols-2 gap-0.5 p-1" style={{ background:'var(--ink)' }}>
+              <span className="bg-white/90 rounded-sm"></span><span className="bg-white/40 rounded-sm"></span>
+              <span className="bg-white/40 rounded-sm"></span><span className="bg-white/90 rounded-sm"></span>
+            </div>
+            <span className="font-display font-bold text-lg" style={{ color:'var(--ink)' }}>Horário Vivo</span>
+          </div>
+
+          <h2 className="font-display text-2xl font-bold mb-1" style={{ color:'var(--ink)' }}>Entrar</h2>
+          <p className="text-sm mb-6" style={{ color:'var(--muted)' }}>Acesse com seu usuário institucional.</p>
+
+          <form onSubmit={handleSubmit}>
+            <Field label="Usuário">
+              <input className={inputClass} style={inputStyle} value={username} onChange={e=>setUsername(e.target.value)} placeholder="ex: professor" autoFocus />
+            </Field>
+            <Field label="Senha">
+              <input type="password" className={inputClass} style={inputStyle} value={password} onChange={e=>setPassword(e.target.value)} placeholder="••••••••" />
+            </Field>
+            {error && <p className="text-sm mb-4 -mt-2" style={{ color:'var(--danger)' }}>{error}</p>}
+            <PrimaryButton type="submit" className="w-full py-2.5">Entrar</PrimaryButton>
+          </form>
+
+          <div className="mt-8 rounded-xl border p-4" style={{ borderColor:'var(--border)', background:'var(--bg)' }}>
+            <p className="text-xs font-semibold uppercase tracking-wide mb-2" style={{ color:'var(--muted)' }}>Credenciais de teste</p>
+            <button onClick={()=>quickFill('professor','prof123')} className="w-full flex items-center justify-between text-left px-3 py-2 rounded-lg bg-white border mb-2 hover:border-[var(--ink-2)] focus-ring" style={{ borderColor:'var(--border)' }}>
+              <span className="text-sm font-medium" style={{ color:'var(--ink)' }}>Professor</span>
+              <span className="font-mono text-xs" style={{ color:'var(--muted)' }}>professor / prof123</span>
+            </button>
+            <button onClick={()=>quickFill('admin','admin123')} className="w-full flex items-center justify-between text-left px-3 py-2 rounded-lg bg-white border hover:border-[var(--ink-2)] focus-ring" style={{ borderColor:'var(--border)' }}>
+              <span className="text-sm font-medium" style={{ color:'var(--ink)' }}>Coordenador</span>
+              <span className="font-mono text-xs" style={{ color:'var(--muted)' }}>admin / admin123</span>
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* =========================================================================
+   TOP BAR
+   ========================================================================= */
+
+function TopBar({ user, onLogout }){
+  return (
+    <div className="sticky top-0 z-40 backdrop-blur bg-white/90 border-b" style={{ borderColor:'var(--border)' }}>
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 py-3 flex items-center justify-between">
+        <div className="flex items-center gap-2.5">
+          <div className="w-8 h-8 rounded-lg grid grid-cols-2 gap-0.5 p-1" style={{ background:'var(--ink)' }}>
+            <span className="bg-white/90 rounded-sm"></span><span className="bg-white/40 rounded-sm"></span>
+            <span className="bg-white/40 rounded-sm"></span><span className="bg-white/90 rounded-sm"></span>
+          </div>
+          <span className="font-display font-bold" style={{ color:'var(--ink)' }}>Horário Vivo</span>
+        </div>
+        <div className="flex items-center gap-3">
+          <div className="text-right hidden sm:block">
+            <p className="text-sm font-semibold leading-none" style={{ color:'var(--ink)' }}>{user.name}</p>
+            <p className="text-xs mt-0.5" style={{ color:'var(--muted-2)' }}>{user.role === 'admin' ? 'Coordenação' : 'Professor(a)'}</p>
+          </div>
+          <button onClick={onLogout} className="rounded-lg px-3 py-1.5 text-sm font-semibold border hover:bg-gray-50 focus-ring" style={{ borderColor:'var(--border)', color:'var(--ink)' }}>
+            Sair
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* =========================================================================
+   FILTROS
+   ========================================================================= */
+
+function FilterBar({ date, setDate, tipo, setTipo, status, setStatus }){
+  return (
+    <div className="bg-white rounded-2xl border p-4 flex flex-wrap gap-4 items-end" style={{ borderColor:'var(--border)' }}>
+      <Field label="Data">
+        <input type="date" value={date} onChange={e=>setDate(e.target.value)} className={inputClass} style={{...inputStyle, minWidth:'160px'}} />
+      </Field>
+      <Field label="Tipo de espaço">
+        <select value={tipo} onChange={e=>setTipo(e.target.value)} className={inputClass} style={{...inputStyle, minWidth:'160px'}}>
+          <option value="todos">Todos</option>
+          <option value="sala">Salas</option>
+          <option value="laboratorio">Laboratórios</option>
+        </select>
+      </Field>
+      <Field label="Status">
+        <select value={status} onChange={e=>setStatus(e.target.value)} className={inputClass} style={{...inputStyle, minWidth:'160px'}}>
+          <option value="todos">Todos</option>
+          <option value="livre">Com horários livres</option>
+          <option value="pendente">Com pendências</option>
+          <option value="reservado">Com reservas</option>
+        </select>
+      </Field>
+      <div className="flex items-center gap-3 ml-auto pb-4 text-xs font-medium" style={{ color:'var(--muted)' }}>
+        <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-sm" style={{background:'var(--free-bg)', border:'1px solid var(--free)'}}></span>Livre</span>
+        <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-sm" style={{background:'var(--pending-bg)'}}></span>Pendente</span>
+        <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-sm" style={{background:'var(--reserved-bg)'}}></span>Reservado</span>
+      </div>
+    </div>
+  );
+}
+
+/* =========================================================================
+   GRADE / TIMETABLE
+   ========================================================================= */
+
+function TimetableGrid({ rooms, date, bookings, onCellClick, clickableFree }){
+  const groups = useMemo(()=>{
+    const out = [];
+    PERIODS.forEach(p=>{
+      let g = out.find(x=>x.shift===p.shift);
+      if(!g){ g = {shift:p.shift, periods:[]}; out.push(g); }
+      g.periods.push(p);
+    });
+    return out;
+  },[]);
+
+  if (rooms.length === 0){
+    return (
+      <div className="bg-white rounded-2xl border p-10 text-center" style={{ borderColor:'var(--border)' }}>
+        <p className="font-display font-semibold text-lg mb-1" style={{ color:'var(--ink)' }}>Nenhum espaço encontrado</p>
+        <p className="text-sm" style={{ color:'var(--muted)' }}>Ajuste os filtros para ver a disponibilidade de outros espaços.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="bg-white rounded-2xl border overflow-hidden" style={{ borderColor:'var(--border)' }}>
+      <div className="overflow-x-auto">
+        <table className="w-full border-collapse text-sm">
+          <thead>
+            <tr>
+              <th className="sticky-col text-left px-4 py-3 font-mono text-xs font-semibold uppercase tracking-wide border-b border-r" style={{ borderColor:'var(--border)', color:'var(--muted)' }}>Horário</th>
+              {rooms.map(room=>(
+                <th key={room.id} className="px-4 py-3 border-b text-left min-w-[150px]" style={{ borderColor:'var(--border)' }}>
+                  <div className="flex flex-col gap-1">
+                    <RoomTypeTag type={room.type} />
+                    <span className="font-mono text-[11px] font-semibold" style={{ color:'var(--ink)' }}>{room.code}</span>
+                    <span className="text-xs" style={{ color:'var(--muted)' }}>{room.name}</span>
+                  </div>
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {groups.map(group=>(
+              <Fragment key={group.shift}>
+                <tr className="shift-row">
+                  <td colSpan={rooms.length+1} className="px-4 py-1.5 text-xs font-display font-semibold tracking-wide">{group.shift.toUpperCase()}</td>
+                </tr>
+                {group.periods.map(period=>(
+                  <tr key={period.id}>
+                    <td className="sticky-col px-4 py-2 border-r border-b font-mono text-xs whitespace-nowrap" style={{ borderColor:'var(--border)', color:'var(--muted)' }}>
+                      <span className="font-semibold" style={{ color:'var(--ink)' }}>{period.id}ª</span> · {period.start}–{period.end}
+                    </td>
+                    {rooms.map(room=>{
+                      const info = getSlotInfo(room.id, date, period, bookings);
+                      const isFreeClickable = info.status === 'livre' && clickableFree;
+                      const isOccupiedClickable = info.status !== 'livre';
+                      const clickable = isFreeClickable || isOccupiedClickable;
+                      const styleMap = {
+                        livre:     { background:'#FAFBFD' },
+                        pendente:  { background:'var(--pending-bg)' },
+                        reservado: { background:'var(--reserved-bg)' },
+                      };
+                      return (
+                        <td key={room.id}
+                            onClick={()=> clickable && onCellClick(room, period, info)}
+                            className={"grid-cell px-3 py-2 border-b align-top " + (clickable ? "cursor-pointer" : "")}
+                            style={{ borderColor:'var(--border)', ...styleMap[info.status] }}>
+                          {info.status === 'livre' && (
+                            <span className="text-[11px]" style={{ color:'var(--free)' }}>{clickableFree ? '+ Agendar' : '—'}</span>
+                          )}
+                          {info.status === 'pendente' && (
+                            <div>
+                              <p className="text-[11px] font-semibold" style={{ color:'var(--pending)' }}>Pendente</p>
+                              <p className="text-[11px] truncate max-w-[120px]" style={{ color:'var(--muted)' }}>{info.bookings[0].subject}</p>
+                            </div>
+                          )}
+                          {info.status === 'reservado' && (
+                            <div>
+                              <p className="text-[11px] font-semibold truncate max-w-[120px]" style={{ color:'var(--reserved)' }}>{info.bookings[0].subject}</p>
+                              <p className="text-[11px] font-mono" style={{ color:'var(--muted)' }}>{info.bookings[0].className}</p>
+                            </div>
+                          )}
+                        </td>
+                      );
+                    })}
+                  </tr>
+                ))}
+              </Fragment>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+/* =========================================================================
+   MODAL DE DETALHE DE CÉLULA
+   ========================================================================= */
+
+function CellDetailModal({ cell, users, rooms, onClose }){
+  const { room, period, info } = cell;
+  const getUserName = (id) => users.find(u=>u.id===id)?.name || 'Desconhecido';
+  return (
+    <Modal title={`${room.name} · ${period.start}–${period.end}`} onClose={onClose}>
+      <div className="space-y-4">
+        {info.bookings.map(b=>(
+          <div key={b.id} className="rounded-xl border p-4" style={{ borderColor:'var(--border)' }}>
+            <div className="flex items-center justify-between mb-2">
+              <Badge status={b.status} />
+              <span className="text-xs font-mono" style={{ color:'var(--muted-2)' }}>{formatDateBR(b.date)}</span>
+            </div>
+            <p className="font-display font-semibold" style={{ color:'var(--ink)' }}>{b.subject}</p>
+            <p className="text-sm" style={{ color:'var(--muted)' }}>Turma {b.className} · {getUserName(b.professorId)}</p>
+            <p className="text-sm mt-2" style={{ color:'var(--ink)' }}>{b.justification}</p>
+            {b.status === 'recusado' && b.rejectionReason && (
+              <p className="text-sm mt-2 rounded-lg px-3 py-2" style={{ background:'var(--danger-bg)', color:'var(--danger)' }}>
+                Motivo da recusa: {b.rejectionReason}
+              </p>
+            )}
+          </div>
+        ))}
+      </div>
+    </Modal>
+  );
+}
+
+/* =========================================================================
+   FORMULÁRIO DE NOVA SOLICITAÇÃO
+   ========================================================================= */
+
+function BookingFormModal({ rooms, defaultValues, onClose, onSubmit }){
+  const [form, setForm] = useState({
+    roomId: defaultValues.roomId || rooms[0]?.id || '',
+    date: defaultValues.date || TODAY,
+    start: defaultValues.start || '07:00',
+    end: defaultValues.end || '07:50',
+    subject: '',
+    className: '',
+    justification: '',
+  });
+  const [error, setError] = useState('');
+
+  function update(field, value){ setForm(f=>({ ...f, [field]: value })); }
+
+  function handleSubmit(e){
+    e.preventDefault();
+    if (!form.subject.trim() || !form.className.trim() || !form.justification.trim()){
+      setError('Preencha todos os campos obrigatórios.'); return;
+    }
+    if (toMinutes(form.end) <= toMinutes(form.start)){
+      setError('O horário de término deve ser depois do horário de início.'); return;
+    }
+    setError('');
+    onSubmit(form);
+  }
+
+  return (
+    <Modal title="Nova solicitação de agendamento" onClose={onClose} wide>
+      <form onSubmit={handleSubmit}>
+        <div className="grid sm:grid-cols-2 gap-x-4">
+          <Field label="Espaço">
+            <select className={inputClass} style={inputStyle} value={form.roomId} onChange={e=>update('roomId', e.target.value)}>
+              {rooms.map(r=><option key={r.id} value={r.id}>{r.code} — {r.name}</option>)}
+            </select>
+          </Field>
+          <Field label="Data">
+            <input type="date" min={TODAY} className={inputClass} style={inputStyle} value={form.date} onChange={e=>update('date', e.target.value)} />
+          </Field>
+          <Field label="Horário de início">
+            <input type="time" className={inputClass} style={inputStyle} value={form.start} onChange={e=>update('start', e.target.value)} />
+          </Field>
+          <Field label="Horário de término">
+            <input type="time" className={inputClass} style={inputStyle} value={form.end} onChange={e=>update('end', e.target.value)} />
+          </Field>
+          <Field label="Disciplina">
+            <input className={inputClass} style={inputStyle} value={form.subject} onChange={e=>update('subject', e.target.value)} placeholder="ex: Biologia" />
+          </Field>
+          <Field label="Turma">
+            <input className={inputClass} style={inputStyle} value={form.className} onChange={e=>update('className', e.target.value)} placeholder="ex: 2ºB" />
+          </Field>
+        </div>
+        <Field label="Justificativa / Recursos necessários" hint="Descreva o objetivo da aula e equipamentos que serão utilizados.">
+          <textarea className={inputClass} style={inputStyle} rows="3" value={form.justification} onChange={e=>update('justification', e.target.value)} placeholder="ex: Aula prática com uso dos microscópios e lâminas preparadas." />
+        </Field>
+        {error && <p className="text-sm mb-4" style={{ color:'var(--danger)' }}>{error}</p>}
+        <div className="flex justify-end gap-3 mt-2">
+          <SecondaryButton type="button" onClick={onClose}>Cancelar</SecondaryButton>
+          <PrimaryButton type="submit">Enviar solicitação</PrimaryButton>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
+/* =========================================================================
+   MINHAS SOLICITAÇÕES (PROFESSOR)
+   ========================================================================= */
+
+function MyBookingsTable({ bookings, rooms }){
+  const getRoomLabel = (id) => rooms.find(r=>r.id===id)?.name || '—';
+  if (bookings.length === 0){
+    return (
+      <div className="bg-white rounded-2xl border p-8 text-center" style={{ borderColor:'var(--border)' }}>
+        <p className="text-sm" style={{ color:'var(--muted)' }}>Você ainda não fez nenhuma solicitação de agendamento.</p>
+      </div>
+    );
+  }
+  return (
+    <div className="bg-white rounded-2xl border overflow-hidden" style={{ borderColor:'var(--border)' }}>
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="text-left" style={{ background:'var(--bg)' }}>
+              {['Data','Horário','Espaço','Disciplina / Turma','Status','Observações'].map(h=>(
+                <th key={h} className="px-4 py-3 font-semibold text-xs uppercase tracking-wide" style={{ color:'var(--muted)' }}>{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {bookings.map(b=>(
+              <tr key={b.id} className="border-t" style={{ borderColor:'var(--border)' }}>
+                <td className="px-4 py-3 font-mono text-xs">{formatDateBR(b.date)}</td>
+                <td className="px-4 py-3 font-mono text-xs">{b.start}–{b.end}</td>
+                <td className="px-4 py-3">{getRoomLabel(b.roomId)}</td>
+                <td className="px-4 py-3">{b.subject} <span style={{ color:'var(--muted-2)' }}>· {b.className}</span></td>
+                <td className="px-4 py-3"><Badge status={b.status} /></td>
+                <td className="px-4 py-3 text-xs max-w-[220px]" style={{ color: b.status==='recusado' ? 'var(--danger)' : 'var(--muted-2)' }}>
+                  {b.status === 'recusado' ? (b.rejectionReason || 'Sem motivo informado.') : '—'}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+/* =========================================================================
+   PAINEL DO PROFESSOR
+   ========================================================================= */
+
+function ProfessorView({ currentUser, rooms, bookings, users, addBooking, showToast }){
+  const [date, setDate] = useState(TODAY);
+  const [tipo, setTipo] = useState('todos');
+  const [status, setStatus] = useState('todos');
+  const [showForm, setShowForm] = useState(false);
+  const [formDefaults, setFormDefaults] = useState({});
+  const [cellDetail, setCellDetail] = useState(null);
+
+  const filteredRooms = useMemo(()=>{
+    return rooms.filter(r=>{
+      if (tipo !== 'todos' && r.type !== tipo) return false;
+      if (status !== 'todos'){
+        const anyMatch = PERIODS.some(p => getSlotInfo(r.id, date, p, bookings).status === status);
+        if (!anyMatch) return false;
+      }
+      return true;
+    });
+  },[rooms, tipo, status, date, bookings]);
+
+  const myBookings = useMemo(()=>{
+    return bookings.filter(b=>b.professorId===currentUser.id).sort((a,b)=> (a.date+a.start) < (b.date+b.start) ? 1 : -1);
+  },[bookings, currentUser.id]);
+
+  const myPending = myBookings.filter(b=>b.status==='pendente').length;
+  const myApproved = myBookings.filter(b=>b.status==='aprovado').length;
+
+  function handleCellClick(room, period, info){
+    if (info.status === 'livre'){
+      setFormDefaults({ roomId: room.id, date, start: period.start, end: period.end });
+      setShowForm(true);
+    } else {
+      setCellDetail({ room, period, info });
+    }
+  }
+
+  function handleSubmitBooking(form){
+    const conflict = hasApprovedConflict(form, bookings, null);
+    if (conflict){
+      showToast('error', 'Este horário já está reservado e aprovado para este espaço. Escolha outro horário.');
+      return;
+    }
+    const pendingConflict = bookings.find(b => b.status==='pendente' && b.roomId===form.roomId && b.date===form.date && overlaps(b.start,b.end,form.start,form.end));
+    addBooking({ ...form, id: uid('bk'), professorId: currentUser.id, status:'pendente', rejectionReason:'' });
+    setShowForm(false);
+    if (pendingConflict){
+      showToast('info', 'Solicitação enviada. Atenção: já existe outra solicitação pendente para esse mesmo horário — a coordenação decidirá qual será aprovada.');
+    } else {
+      showToast('success', 'Solicitação enviada para aprovação da coordenação.');
+    }
+  }
+
+  return (
+    <div className="max-w-7xl mx-auto px-4 sm:px-6 py-8 space-y-6">
+      <div>
+        <h1 className="font-display text-2xl font-bold" style={{ color:'var(--ink)' }}>Painel do Professor</h1>
+        <p className="text-sm mt-1" style={{ color:'var(--muted)' }}>Veja a disponibilidade em tempo real e solicite o agendamento de um espaço.</p>
+      </div>
+
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+        <StatCard label="Espaços disponíveis" value={rooms.length} />
+        <StatCard label="Minhas pendentes" value={myPending} accent="var(--pending)" />
+        <StatCard label="Minhas aprovadas" value={myApproved} accent="var(--reserved)" />
+        <StatCard label="Total de solicitações" value={myBookings.length} />
+      </div>
+
+      <FilterBar date={date} setDate={setDate} tipo={tipo} setTipo={setTipo} status={status} setStatus={setStatus} />
+
+      <TimetableGrid rooms={filteredRooms} date={date} bookings={bookings} onCellClick={handleCellClick} clickableFree={true} />
+
+      <div className="flex items-center justify-between pt-2">
+        <h2 className="font-display text-xl font-bold" style={{ color:'var(--ink)' }}>Minhas solicitações</h2>
+        <PrimaryButton onClick={()=>{ setFormDefaults({ date }); setShowForm(true); }}>+ Nova solicitação</PrimaryButton>
+      </div>
+
+      <MyBookingsTable bookings={myBookings} rooms={rooms} />
+
+      {showForm && (
+        <BookingFormModal rooms={rooms} defaultValues={formDefaults} onClose={()=>setShowForm(false)} onSubmit={handleSubmitBooking} />
+      )}
+      {cellDetail && (
+        <CellDetailModal cell={cellDetail} users={users} rooms={rooms} onClose={()=>setCellDetail(null)} />
+      )}
+    </div>
+  );
+}
+
+/* =========================================================================
+   PAINEL DE MODERAÇÃO (ADMIN)
+   ========================================================================= */
+
+function ModerationCard({ booking, room, professorName, onApprove, onReject }){
+  const [showReject, setShowReject] = useState(false);
+  const [reason, setReason] = useState('');
+  return (
+    <div className="bg-white rounded-2xl border p-5" style={{ borderColor:'var(--border)' }}>
+      <div className="flex flex-wrap items-start justify-between gap-3 mb-3">
+        <div>
+          <p className="font-display font-semibold" style={{ color:'var(--ink)' }}>{booking.subject} <span className="font-normal text-sm" style={{ color:'var(--muted-2)' }}>· Turma {booking.className}</span></p>
+          <p className="text-sm mt-0.5" style={{ color:'var(--muted)' }}>{professorName}</p>
+        </div>
+        <Badge status={booking.status} />
+      </div>
+      <div className="flex flex-wrap gap-x-6 gap-y-1 text-sm mb-3" style={{ color:'var(--ink)' }}>
+        <span><RoomTypeTag type={room.type} /> <span className="ml-1 font-mono text-xs">{room.code}</span> {room.name}</span>
+        <span className="font-mono text-xs">{formatDateBR(booking.date)} · {booking.start}–{booking.end}</span>
+      </div>
+      <p className="text-sm mb-4" style={{ color:'var(--muted)' }}>{booking.justification}</p>
+
+      {!showReject ? (
+        <div className="flex gap-3">
+          <PrimaryButton onClick={onApprove}>Aprovar</PrimaryButton>
+          <SecondaryButton onClick={()=>setShowReject(true)}>Recusar</SecondaryButton>
+        </div>
+      ) : (
+        <div className="rounded-xl border p-3" style={{ borderColor:'var(--border)', background:'var(--bg)' }}>
+          <Field label="Motivo da recusa (opcional)">
+            <textarea className={inputClass} style={{...inputStyle, background:'white'}} rows="2" value={reason} onChange={e=>setReason(e.target.value)} placeholder="ex: Espaço em manutenção neste horário." />
+          </Field>
+          <div className="flex gap-3">
+            <DangerButton onClick={()=>{ onReject(reason); setShowReject(false); setReason(''); }}>Confirmar recusa</DangerButton>
+            <SecondaryButton onClick={()=>setShowReject(false)}>Voltar</SecondaryButton>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ModerationPanel({ bookings, rooms, users, onApprove, onReject }){
+  const pending = bookings.filter(b=>b.status==='pendente').sort((a,b)=> (a.date+a.start) > (b.date+b.start) ? 1 : -1);
+  if (pending.length === 0){
+    return (
+      <div className="bg-white rounded-2xl border p-10 text-center" style={{ borderColor:'var(--border)' }}>
+        <p className="font-display font-semibold text-lg mb-1" style={{ color:'var(--ink)' }}>Tudo em dia</p>
+        <p className="text-sm" style={{ color:'var(--muted)' }}>Não há solicitações pendentes de aprovação no momento.</p>
+      </div>
+    );
+  }
+  return (
+    <div className="space-y-4">
+      {pending.map(b=>(
+        <ModerationCard
+          key={b.id}
+          booking={b}
+          room={rooms.find(r=>r.id===b.roomId)}
+          professorName={users.find(u=>u.id===b.professorId)?.name || '—'}
+          onApprove={()=>onApprove(b)}
+          onReject={(reason)=>onReject(b, reason)}
+        />
+      ))}
+    </div>
+  );
+}
+
+/* =========================================================================
+   GESTÃO DE SALAS/LABORATÓRIOS (ADMIN)
+   ========================================================================= */
+
+function RoomFormFields({ form, update }){
+  return (
+    <div className="grid sm:grid-cols-2 gap-x-4">
+      <Field label="Código">
+        <input className={inputClass} style={inputStyle} value={form.code} onChange={e=>update('code', e.target.value)} placeholder="ex: LAB-BIO" />
+      </Field>
+      <Field label="Nome">
+        <input className={inputClass} style={inputStyle} value={form.name} onChange={e=>update('name', e.target.value)} placeholder="ex: Lab. de Biologia" />
+      </Field>
+      <Field label="Tipo">
+        <select className={inputClass} style={inputStyle} value={form.type} onChange={e=>update('type', e.target.value)}>
+          <option value="sala">Sala convencional</option>
+          <option value="laboratorio">Laboratório</option>
+        </select>
+      </Field>
+      <Field label="Capacidade">
+        <input type="number" min="1" className={inputClass} style={inputStyle} value={form.capacity} onChange={e=>update('capacity', e.target.value)} />
+      </Field>
+      <div className="sm:col-span-2">
+        <Field label="Recursos (separados por vírgula)">
+          <input className={inputClass} style={inputStyle} value={form.resourcesText} onChange={e=>update('resourcesText', e.target.value)} placeholder="ex: Projetor, Ar-condicionado" />
+        </Field>
+      </div>
+    </div>
+  );
+}
+
+function emptyRoomForm(){ return { code:'', name:'', type:'sala', capacity:30, resourcesText:'' }; }
+
+function RoomsManager({ rooms, bookings, addRoom, updateRoom, deleteRoom, showToast }){
+  const [showForm, setShowForm] = useState(false);
+  const [editingId, setEditingId] = useState(null);
+  const [form, setForm] = useState(emptyRoomForm());
+  function update(field, value){ setForm(f=>({ ...f, [field]: value })); }
+
+  function openNew(){ setForm(emptyRoomForm()); setEditingId(null); setShowForm(true); }
+  function openEdit(room){
+    setForm({ code:room.code, name:room.name, type:room.type, capacity:room.capacity, resourcesText:room.resources.join(', ') });
+    setEditingId(room.id); setShowForm(true);
+  }
+
+  function handleSubmit(e){
+    e.preventDefault();
+    if (!form.code.trim() || !form.name.trim()){ showToast('error','Preencha código e nome do espaço.'); return; }
+    const payload = {
+      code: form.code.trim().toUpperCase(),
+      name: form.name.trim(),
+      type: form.type,
+      capacity: Number(form.capacity) || 0,
+      resources: form.resourcesText.split(',').map(s=>s.trim()).filter(Boolean),
+    };
+    if (editingId){ updateRoom(editingId, payload); showToast('success','Espaço atualizado.'); }
+    else { addRoom({ id: uid('r'), ...payload }); showToast('success','Espaço cadastrado.'); }
+    setShowForm(false);
+  }
+
+  function handleDelete(room){
+    const hasActive = bookings.some(b => b.roomId===room.id && b.status!=='recusado' && b.date >= TODAY);
+    if (hasActive){ showToast('error', `Não é possível remover ${room.name}: há agendamentos ativos vinculados a este espaço.`); return; }
+    if (window.confirm(`Remover o espaço "${room.name}"? Esta ação não pode ser desfeita.`)) {
+      deleteRoom(room.id);
+      showToast('info','Espaço removido.');
+    }
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <h2 className="font-display text-xl font-bold" style={{ color:'var(--ink)' }}>Salas e Laboratórios</h2>
+        <PrimaryButton onClick={openNew}>+ Novo espaço</PrimaryButton>
+      </div>
+      <div className="bg-white rounded-2xl border overflow-hidden" style={{ borderColor:'var(--border)' }}>
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-left" style={{ background:'var(--bg)' }}>
+                {['Código','Nome','Tipo','Capacidade','Recursos',''].map(h=>(
+                  <th key={h} className="px-4 py-3 font-semibold text-xs uppercase tracking-wide" style={{ color:'var(--muted)' }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rooms.map(r=>(
+                <tr key={r.id} className="border-t" style={{ borderColor:'var(--border)' }}>
+                  <td className="px-4 py-3 font-mono text-xs font-semibold">{r.code}</td>
+                  <td className="px-4 py-3">{r.name}</td>
+                  <td className="px-4 py-3"><RoomTypeTag type={r.type} /></td>
+                  <td className="px-4 py-3">{r.capacity} lugares</td>
+                  <td className="px-4 py-3 text-xs max-w-[220px]" style={{ color:'var(--muted)' }}>{r.resources.join(', ') || '—'}</td>
+                  <td className="px-4 py-3 text-right whitespace-nowrap">
+                    <button onClick={()=>openEdit(r)} className="text-xs font-semibold mr-3 hover:underline" style={{ color:'var(--ink-2)' }}>Editar</button>
+                    <button onClick={()=>handleDelete(r)} className="text-xs font-semibold hover:underline" style={{ color:'var(--danger)' }}>Excluir</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {showForm && (
+        <Modal title={editingId ? 'Editar espaço' : 'Novo espaço'} onClose={()=>setShowForm(false)} wide>
+          <form onSubmit={handleSubmit}>
+            <RoomFormFields form={form} update={update} />
+            <div className="flex justify-end gap-3 mt-2">
+              <SecondaryButton type="button" onClick={()=>setShowForm(false)}>Cancelar</SecondaryButton>
+              <PrimaryButton type="submit">{editingId ? 'Salvar alterações' : 'Cadastrar espaço'}</PrimaryButton>
+            </div>
+          </form>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+/* =========================================================================
+   GESTÃO DE USUÁRIOS (ADMIN)
+   ========================================================================= */
+
+function emptyUserForm(){ return { name:'', username:'', password:'', role:'professor' }; }
+
+function UsersManager({ users, currentUser, addUser, updateUser, deleteUser, showToast }){
+  const [showForm, setShowForm] = useState(false);
+  const [editingId, setEditingId] = useState(null);
+  const [form, setForm] = useState(emptyUserForm());
+  function update(field, value){ setForm(f=>({ ...f, [field]: value })); }
+
+  function openNew(){ setForm(emptyUserForm()); setEditingId(null); setShowForm(true); }
+  function openEdit(u){ setForm({ name:u.name, username:u.username, password:u.password, role:u.role }); setEditingId(u.id); setShowForm(true); }
+
+  function handleSubmit(e){
+    e.preventDefault();
+    if (!form.name.trim() || !form.username.trim() || !form.password.trim()){
+      showToast('error','Preencha nome, usuário e senha.'); return;
+    }
+    const duplicate = users.find(u => u.username === form.username.trim() && u.id !== editingId);
+    if (duplicate){ showToast('error','Já existe um usuário com este nome de login.'); return; }
+    const payload = { name: form.name.trim(), username: form.username.trim(), password: form.password, role: form.role };
+    if (editingId){ updateUser(editingId, payload); showToast('success','Usuário atualizado.'); }
+    else { addUser({ id: uid('u'), ...payload }); showToast('success','Usuário cadastrado.'); }
+    setShowForm(false);
+  }
+
+  function handleDelete(u){
+    if (u.id === currentUser.id){ showToast('error','Você não pode remover o próprio usuário.'); return; }
+    const admins = users.filter(x=>x.role==='admin');
+    if (u.role === 'admin' && admins.length <= 1){ showToast('error','É necessário manter ao menos um coordenador/administrador.'); return; }
+    if (window.confirm(`Remover o usuário "${u.name}"?`)) { deleteUser(u.id); showToast('info','Usuário removido.'); }
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <h2 className="font-display text-xl font-bold" style={{ color:'var(--ink)' }}>Usuários</h2>
+        <PrimaryButton onClick={openNew}>+ Novo usuário</PrimaryButton>
+      </div>
+      <div className="bg-white rounded-2xl border overflow-hidden" style={{ borderColor:'var(--border)' }}>
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-left" style={{ background:'var(--bg)' }}>
+                {['Nome','Usuário','Perfil',''].map(h=>(
+                  <th key={h} className="px-4 py-3 font-semibold text-xs uppercase tracking-wide" style={{ color:'var(--muted)' }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {users.map(u=>(
+                <tr key={u.id} className="border-t" style={{ borderColor:'var(--border)' }}>
+                  <td className="px-4 py-3">{u.name}{u.id===currentUser.id && <span className="ml-2 text-xs" style={{color:'var(--muted-2)'}}>(você)</span>}</td>
+                  <td className="px-4 py-3 font-mono text-xs">{u.username}</td>
+                  <td className="px-4 py-3">
+                    <span className="text-xs font-semibold px-2 py-1 rounded-full" style={{ background: u.role==='admin' ? 'var(--reserved-bg)' : '#EEF1F8', color: u.role==='admin' ? 'var(--reserved)' : 'var(--muted)' }}>
+                      {u.role === 'admin' ? 'Coordenação' : 'Professor(a)'}
+                    </span>
+                  </td>
+                  <td className="px-4 py-3 text-right whitespace-nowrap">
+                    <button onClick={()=>openEdit(u)} className="text-xs font-semibold mr-3 hover:underline" style={{ color:'var(--ink-2)' }}>Editar</button>
+                    <button onClick={()=>handleDelete(u)} className="text-xs font-semibold hover:underline" style={{ color:'var(--danger)' }}>Excluir</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {showForm && (
+        <Modal title={editingId ? 'Editar usuário' : 'Novo usuário'} onClose={()=>setShowForm(false)}>
+          <form onSubmit={handleSubmit}>
+            <Field label="Nome completo">
+              <input className={inputClass} style={inputStyle} value={form.name} onChange={e=>update('name', e.target.value)} />
+            </Field>
+            <Field label="Usuário (login)">
+              <input className={inputClass} style={inputStyle} value={form.username} onChange={e=>update('username', e.target.value)} />
+            </Field>
+            <Field label="Senha">
+              <input className={inputClass} style={inputStyle} value={form.password} onChange={e=>update('password', e.target.value)} />
+            </Field>
+            <Field label="Perfil">
+              <select className={inputClass} style={inputStyle} value={form.role} onChange={e=>update('role', e.target.value)}>
+                <option value="professor">Professor(a)</option>
+                <option value="admin">Coordenação / Administrador</option>
+              </select>
+            </Field>
+            <div className="flex justify-end gap-3 mt-2">
+              <SecondaryButton type="button" onClick={()=>setShowForm(false)}>Cancelar</SecondaryButton>
+              <PrimaryButton type="submit">{editingId ? 'Salvar alterações' : 'Cadastrar usuário'}</PrimaryButton>
+            </div>
+          </form>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+/* =========================================================================
+   PAINEL ADMIN (COORDENAÇÃO)
+   ========================================================================= */
+
+function AdminView({ currentUser, rooms, bookings, users, setBookings, addRoom, updateRoom, deleteRoom, addUser, updateUser, deleteUser, showToast }){
+  const [tab, setTab] = useState('visao');
+  const [date, setDate] = useState(TODAY);
+  const [tipo, setTipo] = useState('todos');
+  const [status, setStatus] = useState('todos');
+  const [cellDetail, setCellDetail] = useState(null);
+
+  const filteredRooms = useMemo(()=>{
+    return rooms.filter(r=>{
+      if (tipo !== 'todos' && r.type !== tipo) return false;
+      if (status !== 'todos'){
+        const anyMatch = PERIODS.some(p => getSlotInfo(r.id, date, p, bookings).status === status);
+        if (!anyMatch) return false;
+      }
+      return true;
+    });
+  },[rooms, tipo, status, date, bookings]);
+
+  const pendingCount = bookings.filter(b=>b.status==='pendente').length;
+  const approvedToday = bookings.filter(b=>b.status==='aprovado' && b.date===TODAY).length;
+  const occupancyToday = useMemo(()=>{
+    const totalCells = rooms.length * PERIODS.length;
+    if (totalCells === 0) return 0;
+    let occupied = 0;
+    rooms.forEach(r => PERIODS.forEach(p => {
+      if (getSlotInfo(r.id, TODAY, p, bookings).status === 'reservado') occupied++;
+    }));
+    return Math.round((occupied/totalCells)*100);
+  },[rooms, bookings]);
+
+  function handleApprove(booking){
+    const conflict = hasApprovedConflict(booking, bookings, booking.id);
+    if (conflict){
+      showToast('error', `Conflito de horário: já existe uma reserva aprovada nesse espaço das ${conflict.start} às ${conflict.end} em ${formatDateBR(conflict.date)}. Recuse uma das solicitações antes de aprovar esta.`);
+      return;
+    }
+    setBookings(prev => prev.map(b => b.id===booking.id ? { ...b, status:'aprovado' } : b));
+    showToast('success', 'Solicitação aprovada.');
+  }
+
+  function handleReject(booking, reason){
+    setBookings(prev => prev.map(b => b.id===booking.id ? { ...b, status:'recusado', rejectionReason: reason || '' } : b));
+    showToast('info', 'Solicitação recusada.');
+  }
+
+  function handleCellClick(room, period, info){
+    if (info.status !== 'livre') setCellDetail({ room, period, info });
+  }
+
+  const tabs = [
+    { id:'visao', label:'Visão geral' },
+    { id:'moderacao', label:`Moderação${pendingCount ? ' (' + pendingCount + ')' : ''}` },
+    { id:'salas', label:'Salas & Laboratórios' },
+    { id:'usuarios', label:'Usuários' },
+  ];
+
+  return (
+    <div className="max-w-7xl mx-auto px-4 sm:px-6 py-8 space-y-6">
+      <div>
+        <h1 className="font-display text-2xl font-bold" style={{ color:'var(--ink)' }}>Painel da Coordenação</h1>
+        <p className="text-sm mt-1" style={{ color:'var(--muted)' }}>Modere solicitações e gerencie espaços e usuários da instituição.</p>
+      </div>
+
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+        <StatCard label="Espaços cadastrados" value={rooms.length} />
+        <StatCard label="Pendentes de aprovação" value={pendingCount} accent="var(--pending)" />
+        <StatCard label="Aprovadas hoje" value={approvedToday} accent="var(--reserved)" />
+        <StatCard label="Ocupação hoje" value={occupancyToday + '%'} />
+      </div>
+
+      <div className="flex gap-2 flex-wrap border-b" style={{ borderColor:'var(--border)' }}>
+        {tabs.map(t=>(
+          <button key={t.id} onClick={()=>setTab(t.id)}
+            className={"px-4 py-2.5 text-sm font-semibold rounded-t-lg -mb-px border-b-2 transition focus-ring"}
+            style={ tab===t.id ? { borderColor:'var(--ink)', color:'var(--ink)' } : { borderColor:'transparent', color:'var(--muted)' } }>
+            {t.label}
+          </button>
+        ))}
+      </div>
+
+      {tab === 'visao' && (
+        <div className="space-y-6">
+          <FilterBar date={date} setDate={setDate} tipo={tipo} setTipo={setTipo} status={status} setStatus={setStatus} />
+          <TimetableGrid rooms={filteredRooms} date={date} bookings={bookings} onCellClick={handleCellClick} clickableFree={false} />
+        </div>
+      )}
+
+      {tab === 'moderacao' && (
+        <ModerationPanel bookings={bookings} rooms={rooms} users={users} onApprove={handleApprove} onReject={handleReject} />
+      )}
+
+      {tab === 'salas' && (
+        <RoomsManager rooms={rooms} bookings={bookings} addRoom={addRoom} updateRoom={updateRoom} deleteRoom={deleteRoom} showToast={showToast} />
+      )}
+
+      {tab === 'usuarios' && (
+        <UsersManager users={users} currentUser={currentUser} addUser={addUser} updateUser={updateUser} deleteUser={deleteUser} showToast={showToast} />
+      )}
+
+      {cellDetail && (
+        <CellDetailModal cell={cellDetail} users={users} rooms={rooms} onClose={()=>setCellDetail(null)} />
+      )}
+    </div>
+  );
+}
+
+/* =========================================================================
+   APP RAIZ
+   ========================================================================= */
+
+function App(){
+  const [users, setUsers] = useState(INITIAL_USERS);
+  const [rooms, setRooms] = useState(INITIAL_ROOMS);
+  const [bookings, setBookings] = useState(INITIAL_BOOKINGS);
+  const [currentUser, setCurrentUser] = useState(null);
+  const [toast, setToast] = useState(null);
+  const toastTimer = useRef(null);
+
+  function showToast(type, message){
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+    setToast({ type, message });
+    toastTimer.current = setTimeout(()=>setToast(null), 4500);
+  }
+
+  function addBooking(b){ setBookings(prev=>[...prev, b]); }
+  function addRoom(r){ setRooms(prev=>[...prev, r]); }
+  function updateRoom(id, payload){ setRooms(prev=>prev.map(r=>r.id===id?{...r,...payload}:r)); }
+  function deleteRoom(id){ setRooms(prev=>prev.filter(r=>r.id!==id)); }
+  function addUser(u){ setUsers(prev=>[...prev, u]); }
+  function updateUser(id, payload){ setUsers(prev=>prev.map(u=>u.id===id?{...u,...payload}:u)); }
+  function deleteUser(id){ setUsers(prev=>prev.filter(u=>u.id!==id)); }
+
+  if (!currentUser){
+    return (
+      <Fragment>
+        <LoginScreen users={users} onLogin={setCurrentUser} showToast={showToast} />
+        <Toast toast={toast} />
+      </Fragment>
+    );
+  }
+
+  return (
+    <div className="min-h-screen">
+      <TopBar user={currentUser} onLogout={()=>{ setCurrentUser(null); showToast('info','Sessão encerrada.'); }} />
+      {currentUser.role === 'professor' ? (
+        <ProfessorView currentUser={currentUser} rooms={rooms} bookings={bookings} users={users} addBooking={addBooking} showToast={showToast} />
+      ) : (
+        <AdminView currentUser={currentUser} rooms={rooms} bookings={bookings} users={users} setBookings={setBookings}
+                   addRoom={addRoom} updateRoom={updateRoom} deleteRoom={deleteRoom}
+                   addUser={addUser} updateUser={updateUser} deleteUser={deleteUser} showToast={showToast} />
+      )}
+      <Toast toast={toast} />
+    </div>
+  );
+}
+
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(<App />);
+</script>
+</body>
+</html>
